@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+groq
+langchain-google-genai
+langchain-postgres
+psycopg[binary]
+pgvector
