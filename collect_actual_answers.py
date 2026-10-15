@@ -1,5 +1,6 @@
 """Collect real BanglaLaw-AI API responses for offline evaluation."""
 
+import argparse
 import json
 import urllib.error
 import urllib.request
@@ -29,10 +30,7 @@ CASES = [
             "under the Consumer Rights Protection Act, 2009?"
         ),
         "expected_section": "60",
-        "required_facts": [
-            "30 days",
-            "Director General",
-        ],
+        "required_facts": ["30 days", "Director General"],
         "expected_abstention": False,
     },
     {
@@ -90,6 +88,14 @@ def request_answer(question):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Regenerate existing test records from the live API.",
+    )
+    args = parser.parse_args()
+
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     existing = []
@@ -101,15 +107,32 @@ def main():
                 if line.strip()
             ]
 
-    existing_ids = {record["id"] for record in existing}
+    cases_by_id = {case["id"]: case for case in CASES}
+    existing_by_id = {record["id"]: record for record in existing}
+
+    # Preserve records unrelated to these live API test cases.
+    if args.refresh:
+        records = [
+            record
+            for record in existing
+            if record["id"] not in cases_by_id
+        ]
+    else:
+        records = list(existing)
+
+    records_by_id = {record["id"]: record for record in records}
+    updated = 0
     added = 0
 
     for case in CASES:
-        if case["id"] in existing_ids:
+        old_record = existing_by_id.get(case["id"])
+
+        if old_record and not args.refresh:
             print(f"[SKIP] {case['id']} already exists")
             continue
 
-        print(f"\nRequesting: {case['id']}")
+        action = "Refreshing" if old_record else "Requesting"
+        print(f"\n{action}: {case['id']}")
 
         try:
             response = request_answer(case["question"])
@@ -129,7 +152,6 @@ def main():
             "record_type": "live_api_response",
         }
 
-        # Pick the actual cited label for the expected section, if present.
         expected_section = case["expected_section"]
         record["expected_citation"] = next(
             (
@@ -141,13 +163,12 @@ def main():
             None,
         )
 
-        with OUTPUT_PATH.open("a", encoding="utf-8") as file:
-            file.write(
-                json.dumps(record, ensure_ascii=False) + "\n"
-            )
+        records_by_id[case["id"]] = record
 
-        existing_ids.add(case["id"])
-        added += 1
+        if old_record:
+            updated += 1
+        else:
+            added += 1
 
         print("Answer:", response["answer"])
         print(
@@ -162,7 +183,16 @@ def main():
             ],
         )
 
+    # Write atomically so an interrupted write does not truncate the dataset.
+    temporary_path = OUTPUT_PATH.with_suffix(".jsonl.tmp")
+    with temporary_path.open("w", encoding="utf-8") as file:
+        for record in records_by_id.values():
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    temporary_path.replace(OUTPUT_PATH)
+
     print(f"\nAdded {added} response(s).")
+    print(f"Refreshed {updated} response(s).")
     print(f"Dataset: {OUTPUT_PATH}")
 
 

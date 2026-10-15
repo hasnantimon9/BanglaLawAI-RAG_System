@@ -2,12 +2,12 @@ import json
 import os
 import sys
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_postgres import PGVector
-
+from sqlalchemy import create_engine, text
 
 # --------------------------------------------------
 # Configuration
@@ -22,6 +22,7 @@ load_dotenv(dotenv_path=ENV_PATH)
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 COLLECTION_NAME = "banglalawai_consumer_rights_2009"
 EMBEDDING_DIMENSION = 3072
@@ -33,24 +34,38 @@ BATCH_SIZE = 16
 # --------------------------------------------------
 
 if not GOOGLE_API_KEY:
-    sys.exit("ERROR: GOOGLE_API_KEY is missing from .env")
-
-if not POSTGRES_PASSWORD:
-    sys.exit("ERROR: POSTGRES_PASSWORD is missing from .env")
+    sys.exit("ERROR: GOOGLE_API_KEY is missing from the environment.")
 
 if not CHUNKS_PATH.is_file():
     sys.exit(f"ERROR: Chunk file not found: {CHUNKS_PATH}")
 
+if not DATABASE_URL:
+    if not POSTGRES_PASSWORD:
+        sys.exit(
+            "ERROR: Set DATABASE_URL or POSTGRES_PASSWORD."
+        )
+
+    # Backward-compatible local PostgreSQL configuration.
+    DATABASE_URL = (
+        "postgresql://banglalawai:"
+        f"{quote_plus(POSTGRES_PASSWORD)}"
+        "@127.0.0.1:5432/banglalawai"
+    )
+
 
 # --------------------------------------------------
-# PostgreSQL connection
+# Normalize PostgreSQL URL for SQLAlchemy / PGVector
 # --------------------------------------------------
 
-connection_string = (
-    "postgresql+psycopg://banglalawai:"
-    f"{quote_plus(POSTGRES_PASSWORD)}"
-    "@127.0.0.1:5432/banglalawai"
-)
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgres://"):]
+
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace(
+        "postgresql://",
+        "postgresql+psycopg://",
+        1,
+    )
 
 
 # --------------------------------------------------
@@ -155,7 +170,7 @@ embeddings = GoogleGenerativeAIEmbeddings(
 
 vector_store = PGVector(
     embeddings=embeddings,
-    connection=connection_string,
+    connection=DATABASE_URL,
     collection_name=COLLECTION_NAME,
     embedding_length=EMBEDDING_DIMENSION,
     distance_strategy="cosine",
@@ -163,7 +178,39 @@ vector_store = PGVector(
     create_extension=False,
 )
 
+# --------------------------------------------------
+# Resume indexing: skip chunks already stored in Neon
+# --------------------------------------------------
 
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+
+try:
+    with engine.connect() as conn:
+        result = conn.execute(
+            text("""
+                    SELECT e.id
+                    FROM langchain_pg_embedding AS e
+                    JOIN langchain_pg_collection AS c
+                        ON e.collection_id = c.uuid
+                    WHERE c.name = :collection_name
+            """),
+            {"collection_name": COLLECTION_NAME},
+        )
+        existing_ids = set(result.scalars().all())
+finally:
+    engine.dispose()
+
+chunks = [
+    chunk for chunk in chunks
+    if chunk["chunk_id"] not in existing_ids
+]
+
+print(f"Already indexed: {len(existing_ids)}")
+print(f"Chunks remaining: {len(chunks)}")
+
+if not chunks:
+    print("All chunks are already indexed.")
+    sys.exit(0)
 # --------------------------------------------------
 # Embed and index in batches
 # --------------------------------------------------

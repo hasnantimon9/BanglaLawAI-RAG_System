@@ -73,6 +73,17 @@ MANDATORY RULES:
      the provision.
    - If a condition or exception is unclear, state that limitation
      instead of guessing.
+   - Before finalizing an answer, check the retrieved provision for
+     conditions such as knowingly, intentionally, repeatedly, or
+     only when a specified circumstance exists.
+   - For penalty questions, include the prohibited conduct, every
+     explicit condition, the maximum imprisonment, the maximum fine,
+     and whether the penalties are alternatives or may be combined,
+     whenever those details appear in the retrieved passage.
+   - For Bangla answers, preserve legally significant Bangla terms
+     such as "জ্ঞাতসারে" rather than silently omitting them.
+   - Use only citation labels exactly as supplied in the context.
+     For a supported answer, cite the passage containing the rule.
 
 5. EVIDENCE AND ABSTENTION:
    - If the supplied passages do not support the answer, say that

@@ -7,24 +7,51 @@ import psycopg
 from dotenv import load_dotenv
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
+
+# --------------------------------------------------
+# Configuration
+# --------------------------------------------------
+
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(dotenv_path=BASE_DIR / ".env")
 
+DATABASE_URL = os.getenv("DATABASE_URL")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-if not POSTGRES_PASSWORD or not GOOGLE_API_KEY:
-    sys.exit("ERROR: Check GOOGLE_API_KEY and POSTGRES_PASSWORD in .env")
+if not GOOGLE_API_KEY:
+    sys.exit("ERROR: GOOGLE_API_KEY is missing from the environment.")
+
+if not DATABASE_URL:
+    if not POSTGRES_PASSWORD:
+        sys.exit(
+            "ERROR: Set DATABASE_URL or POSTGRES_PASSWORD."
+        )
+
+    # Backward-compatible local PostgreSQL configuration.
+    DATABASE_URL = (
+        "postgresql://banglalawai:"
+        f"{quote_plus(POSTGRES_PASSWORD)}"
+        "@127.0.0.1:5432/banglalawai"
+    )
+
+# psycopg.connect() expects a standard PostgreSQL URL.
+if DATABASE_URL.startswith("postgresql+psycopg://"):
+    DATABASE_URL = DATABASE_URL.replace(
+        "postgresql+psycopg://",
+        "postgresql://",
+        1,
+    )
+elif DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgres://"):]
+
+
+# --------------------------------------------------
+# Vector-store configuration
+# --------------------------------------------------
 
 COLLECTION = "banglalawai_consumer_rights_2009"
 
-connection_string = (
-    "postgresql+psycopg://banglalawai:"
-    f"{quote_plus(POSTGRES_PASSWORD)}"
-    "@127.0.0.1:5432/banglalawai"
-)
-
-# Query embeddings must use the retrieval-query task type.
 query_embeddings = GoogleGenerativeAIEmbeddings(
     model="gemini-embedding-001",
     task_type="RETRIEVAL_QUERY",
@@ -32,8 +59,13 @@ query_embeddings = GoogleGenerativeAIEmbeddings(
 )
 
 
+# --------------------------------------------------
+# Retrieval
+# --------------------------------------------------
+
 def retrieve(question: str, k: int = 5) -> list[dict]:
-    """Return the k most relevant legal chunks for a question."""
+    """Return the k most relevant legal chunks."""
+
     if not question.strip():
         raise ValueError("Question cannot be empty.")
 
@@ -43,18 +75,17 @@ def retrieve(question: str, k: int = 5) -> list[dict]:
     query_vector = query_embeddings.embed_query(question)
 
     with psycopg.connect(
-        host="127.0.0.1",
-        port=5432,
-        dbname="banglalawai",
-        user="banglalawai",
-        password=POSTGRES_PASSWORD,
-        connect_timeout=5,
+        DATABASE_URL,
+        connect_timeout=10,
     ) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT e.id, e.document, e.cmetadata,
-                       1 - (e.embedding <=> %s::vector) AS similarity
+                SELECT
+                    e.id,
+                    e.document,
+                    e.cmetadata,
+                    1 - (e.embedding <=> %s::vector) AS similarity
                 FROM langchain_pg_embedding AS e
                 JOIN langchain_pg_collection AS c
                     ON e.collection_id = c.uuid
@@ -62,7 +93,12 @@ def retrieve(question: str, k: int = 5) -> list[dict]:
                 ORDER BY e.embedding <=> %s::vector
                 LIMIT %s
                 """,
-                (str(query_vector), COLLECTION, str(query_vector), k),
+                (
+                    str(query_vector),
+                    COLLECTION,
+                    str(query_vector),
+                    k,
+                ),
             )
 
             rows = cur.fetchall()
@@ -76,27 +112,3 @@ def retrieve(question: str, k: int = 5) -> list[dict]:
         }
         for row in rows
     ]
-
-
-if __name__ == "__main__":
-    question = input("Ask a question about the Consumer Rights Protection Act, 2009: ")
-
-    try:
-        results = retrieve(question, k=5)
-    except Exception as exc:
-        sys.exit(f"Retrieval failed: {type(exc).__name__}: {exc}")
-
-    if not results:
-        print("No matching passages found.")
-        sys.exit(0)
-
-    for i, result in enumerate(results, start=1):
-        metadata = result["metadata"]
-
-        print(f"\n{'=' * 70}")
-        print(f"Result {i} | Similarity: {result['similarity']:.4f}")
-        print(f"Chunk ID: {result['chunk_id']}")
-        print(f"Section: {metadata.get('section_number')}")
-        print(f"Title: {metadata.get('title')}")
-        print(f"Source: {metadata.get('source_url')}")
-        print(f"\n{result['text']}")
